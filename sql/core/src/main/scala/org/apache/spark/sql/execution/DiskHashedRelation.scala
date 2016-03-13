@@ -53,13 +53,15 @@ private[sql] sealed trait DiskHashedRelation {
 protected [sql] final class GeneralDiskHashedRelation(partitions: Array[DiskPartition])
 	extends DiskHashedRelation with Serializable {
 
+    val partitionArray = partitions
+
 	override def getIterator() = {
-        // IMPLEMENT ME
-        null
+        partitionArray.iterator
 	}
 
 	override def closeAllPartitions() = {
-        // IMPLEMENT ME
+        for (partition <- partitionArray.iterator)
+            partition.closePartition()
 	}
 }
 
@@ -83,9 +85,8 @@ private[sql] class DiskPartition (
 	def insert(row: Row) = {
         if (inputClosed)
             throw new SparkException("Can't insert into a closed partition!")
-        
-        data.add(row: Row)
 
+        data.add(row: Row)
         // Check if size exceeded blocksize
         val newSize: Int = measurePartitionSize()
         if (newSize > block_size)
@@ -107,7 +108,7 @@ private[sql] class DiskPartition (
 	 */
 	private[this] def spillPartitionToDisk() = {
         val bytes: Array[Byte] = getBytesFromList(data)
-
+        println("Adding chunk of size %d".format(bytes.size))
         // This array list stores the sizes of chunks written in order to read them back correctly.
         chunkSizes.add(bytes.size)
 
@@ -161,8 +162,7 @@ private[sql] class DiskPartition (
                         chunkOffset += chunkSize
                         val newRowList = CS143Utils.getListFromBytes(nextChunkBytes)
                         currentIterator = newRowList.iterator().asScala
-
-                        true
+                        currentIterator.hasNext
                     }
                 } else {
                     false
@@ -218,7 +218,38 @@ private[sql] object DiskHashedRelation {
 				keyGenerator: Projection,
 				size: Int = 64,
 				blockSize: Int = 64000) = {
-        // IMPLEMENT ME
-        null
+        // Construct array of partitions
+        val partitionArray: Array[DiskPartition] = new Array[DiskPartition](size)
+
+        for (i <- 0 until size)
+            partitionArray(i) = new DiskPartition(i.toString, blockSize)
+
+        // Insert appropriately
+        for (row: Row <- input) {
+            val partitionNumber: Int = keyGenerator.apply(row).hashCode() % size
+            println("Inserting row into partition %d".format(partitionNumber))
+            partitionArray(partitionNumber).insert(row)
+        }
+
+        // Close input for all partitions
+        for (partition <- partitionArray)
+            partition.closeInput()
+
+        // Return the DiskHashedRelation
+        new DiskHashedRelation {
+            /**
+              * @return an iterator of the [[DiskPartition]]s that make up this relation.
+              */
+            override def getIterator(): scala.Iterator[_root_.org.apache.spark.sql.execution.DiskPartition] =
+                partitionArray.iterator
+
+            /**
+              * Close all the partitions for this relation. This should involve deleting the files hashed into.
+              */
+            override def closeAllPartitions(): Unit = {
+                for (partition <- partitionArray)
+                    partition.closePartition()
+            }
+        }
 	}
 }
